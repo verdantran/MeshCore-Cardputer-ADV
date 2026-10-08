@@ -148,6 +148,7 @@ private:
     int _public_info_scroll_pos; // Scroll position for Public Info options
     int _radio_preset_scroll_pos; // Scroll position for Radio Preset list
     int _radio_setup_scroll_pos; // Scroll position for Radio Setup list
+    int _device_info_scroll_pos; // Scroll position for Device Info lines
     
     // Public Info editing state
     bool _editing_name;

@@ -190,6 +190,10 @@ bool MyMesh::Frame::isChannelMsg() const {
 }
 
 void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
+#ifdef OFFLINE_QUEUE_FLASH
+  if (addToFlashQueue(frame, len)) return;
+  MESH_DEBUG_PRINTLN("WARN: flash offline queue write failed, using RAM queue");
+#endif
   if (offline_queue_len >= OFFLINE_QUEUE_SIZE) {
     MESH_DEBUG_PRINTLN("WARN: offline_queue is full!");
     int pos = 0;
@@ -214,6 +218,10 @@ void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
 }
 
 int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
+#ifdef OFFLINE_QUEUE_FLASH
+  int flash_len = getFromFlashQueue(frame);
+  if (flash_len > 0) return flash_len;
+#endif
   if (offline_queue_len > 0) {         // check offline queue
     size_t len = offline_queue[0].len; // take from top of queue
     memcpy(frame, offline_queue[0].buf, len);
@@ -226,6 +234,166 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
   }
   return 0; // queue is empty
 }
+
+int MyMesh::getOfflineQueueCount() const {
+#ifdef OFFLINE_QUEUE_FLASH
+  return offline_queue_len + oq_flash_count;
+#else
+  return offline_queue_len;
+#endif
+}
+
+#ifdef OFFLINE_QUEUE_FLASH
+// Each segment file holds up to OFFLINE_FLASH_SEG_SIZE records of [len:1][frame:len], appended in order.
+// Messages are read from the head segment, which is deleted once fully read. Segments are only ever
+// appended to or deleted, never rewritten, so a power cut can at worst leave a truncated last record.
+#define OFFLINE_FLASH_DIR  "/oq"
+
+static void oqSegPath(char* dest, uint32_t seq) {
+  sprintf(dest, OFFLINE_FLASH_DIR "/%08lx", (unsigned long)seq);
+}
+
+// count the intact records in a segment, starting at byte offset from_pos
+int MyMesh::countFlashSegment(uint32_t seq, uint32_t from_pos) {
+  char path[24];
+  oqSegPath(path, seq);
+  File f = _store->getPrimaryFS()->open(path, "r");
+  if (!f) return 0;
+  int n = 0;
+  uint32_t pos = from_pos, size = f.size();
+  while (pos < size) {
+    f.seek(pos);
+    uint8_t len;
+    if (f.read(&len, 1) != 1 || len == 0 || len > MAX_FRAME_SIZE || pos + 1 + len > size) break;
+    pos += 1 + len;
+    n++;
+  }
+  f.close();
+  return n;
+}
+
+void MyMesh::initFlashQueue() {
+  FILESYSTEM* fs = _store->getPrimaryFS();
+  fs->mkdir(OFFLINE_FLASH_DIR);
+
+  // find the range of existing segments
+  bool found = false;
+  uint32_t lo = 0, hi = 0;
+  File dir = fs->open(OFFLINE_FLASH_DIR);
+  if (dir) {
+    File f;
+    while ((f = dir.openNextFile())) {
+      const char* name = f.name();
+      const char* slash = strrchr(name, '/');
+      uint32_t seq = strtoul(slash ? slash + 1 : name, NULL, 16);
+      f.close();
+      if (!found || seq < lo) lo = seq;
+      if (!found || seq > hi) hi = seq;
+      found = true;
+    }
+    dir.close();
+  }
+
+  oq_flash_count = 0;
+  oq_head_pos = 0;
+  if (found) {
+    for (uint32_t seq = lo; seq <= hi; seq++) oq_flash_count += countFlashSegment(seq, 0);
+    if (oq_flash_count == 0) {   // nothing readable left, so clear out the stale segments
+      char path[24];
+      for (uint32_t seq = lo; seq <= hi; seq++) {
+        oqSegPath(path, seq);
+        fs->remove(path);
+      }
+    }
+    oq_head_seq = lo;
+    oq_tail_seq = hi + 1;   // always append to a fresh segment, in case the last one ends in a torn write
+  } else {
+    oq_head_seq = oq_tail_seq = 0;
+  }
+  oq_tail_count = 0;
+  oq_flash_ok = true;
+  MESH_DEBUG_PRINTLN("offline queue: %d messages in flash", oq_flash_count);
+}
+
+bool MyMesh::addToFlashQueue(const uint8_t frame[], int len) {
+  if (!oq_flash_ok || len <= 0 || len > MAX_FRAME_SIZE) return false;
+  FILESYSTEM* fs = _store->getPrimaryFS();
+  char path[24];
+
+  if (oq_tail_count >= OFFLINE_FLASH_SEG_SIZE) {
+    oq_tail_seq++;
+    oq_tail_count = 0;
+  }
+
+  // at capacity: drop the oldest segment
+  while (oq_flash_count >= OFFLINE_FLASH_MAX_MSGS && oq_head_seq != oq_tail_seq) {
+    MESH_DEBUG_PRINTLN("WARN: flash offline queue full, dropping oldest segment");
+    oq_flash_count -= countFlashSegment(oq_head_seq, oq_head_pos);
+    oqSegPath(path, oq_head_seq);
+    fs->remove(path);
+    oq_head_seq++;
+    oq_head_pos = 0;
+  }
+
+  oqSegPath(path, oq_tail_seq);
+  File f = fs->open(path, "a");
+  if (!f) return false;
+  uint8_t len_byte = len;
+  bool ok = f.write(&len_byte, 1) == 1 && f.write(frame, len) == (size_t)len;
+  f.close();
+  if (!ok) return false;   // a partial record is skipped by the reader
+
+  if (oq_flash_count == 0) {   // queue was empty: reading starts at this segment
+    oq_head_seq = oq_tail_seq;
+    oq_head_pos = 0;
+  }
+  oq_tail_count++;
+  oq_flash_count++;
+  return true;
+}
+
+int MyMesh::getFromFlashQueue(uint8_t frame[]) {
+  if (!oq_flash_ok) return 0;
+  FILESYSTEM* fs = _store->getPrimaryFS();
+  char path[24];
+
+  while (oq_flash_count > 0) {
+    oqSegPath(path, oq_head_seq);
+    File f = fs->open(path, "r");
+    if (f) {
+      uint32_t size = f.size();
+      uint8_t len;
+      if (oq_head_pos < size && f.seek(oq_head_pos) && f.read(&len, 1) == 1
+          && len > 0 && len <= MAX_FRAME_SIZE && f.read(frame, len) == len) {
+        f.close();
+        oq_head_pos += 1 + len;
+        oq_flash_count--;
+        if (oq_flash_count == 0) {   // fully drained: clean up, keep appending at the tail
+          if (oq_head_seq != oq_tail_seq) fs->remove(path);
+          char tail_path[24];
+          oqSegPath(tail_path, oq_tail_seq);
+          fs->remove(tail_path);
+          oq_tail_seq++;
+          oq_tail_count = 0;
+          oq_head_seq = oq_tail_seq;
+          oq_head_pos = 0;
+        }
+        return len;
+      }
+      f.close();
+    }
+    // head segment is used up, missing or has a torn record
+    if (oq_head_seq == oq_tail_seq) {
+      oq_flash_count = 0;   // nothing further can exist; resync the count
+      break;
+    }
+    fs->remove(path);
+    oq_head_seq++;
+    oq_head_pos = 0;
+  }
+  return 0;
+}
+#endif
 
 void MyMesh::queueOutgoingMessageForBLE(const ContactInfo* contact, const ChannelDetails* channel,
                                          const char* from_name, const char* text, uint32_t timestamp) {
@@ -448,7 +616,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // we only want to show text messages on display, not cli data
   bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
   if (should_display && _ui) {
-    _ui->newMsg(path_len, from.name, text, offline_queue_len);
+    _ui->newMsg(path_len, from.name, text, getOfflineQueueCount());
     if (!_serial->isConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
@@ -548,7 +716,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   if (getChannel(channel_idx, channel_details)) {
     channel_name = channel_details.name;
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, text, offline_queue_len);
+  if (_ui) _ui->newMsg(path_len, channel_name, text, getOfflineQueueCount());
 #endif
 }
 
@@ -790,6 +958,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _iter_started = false;
   _cli_rescue = false;
   offline_queue_len = 0;
+#ifdef OFFLINE_QUEUE_FLASH
+  oq_flash_ok = false;
+  oq_flash_count = 0;
+#endif
   app_target_ver = 0;
   clearPendingReqs();
   next_ack_idx = 0;
@@ -870,6 +1042,9 @@ void MyMesh::begin(bool has_display) {
   _store->loadContacts(this);
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
+#ifdef OFFLINE_QUEUE_FLASH
+  initFlashQueue();
+#endif
 
   radio_set_params(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_set_tx_power(_prefs.tx_power_dbm);
@@ -1199,7 +1374,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     if ((out_len = getFromOfflineQueue(out_frame)) > 0) {
       _serial->writeFrame(out_frame, out_len);
 #ifdef DISPLAY_CLASS
-      if (_ui) _ui->msgRead(offline_queue_len);
+      if (_ui) _ui->msgRead(getOfflineQueueCount());
 #endif
     } else {
       out_frame[0] = RESP_CODE_NO_MORE_MESSAGES;

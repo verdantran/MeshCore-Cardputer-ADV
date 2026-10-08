@@ -46,6 +46,53 @@ protected:
 
 extern MyMesh the_mesh;
 
+// Approximate Li-ion charge from cell voltage (3.0V = 0%, 4.2V = 100%)
+static int battPercentFromMv(uint16_t mv) {
+    int pct = ((int)mv - 3000) * 100 / (4200 - 3000);
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+// Battery icon + percent for the right of the home screen header bar
+static void drawHeaderBattery(UITask& ui, DisplayDriver* display, uint16_t main_color) {
+    // ADC readings are noisy, so only re-read every 10s
+    static uint32_t next_read = 0;
+    static int percent = -1;
+    if (next_read == 0 || (int32_t)(millis() - next_read) >= 0) {
+        uint16_t mv = ui.getBattMilliVolts();
+        percent = mv > 0 ? battPercentFromMv(mv) : -1;
+        next_read = millis() + 10000;
+    }
+    if (percent < 0) return;
+
+    // icon sits 6px in from the right edge, mirroring the menu icon's padding on the left
+    uint16_t fill_color = percent <= 20 ? TFT_RED : main_color;
+    M5Cardputer.Display.drawRect(210, 8, 22, 12, main_color);   // body
+    M5Cardputer.Display.fillRect(232, 11, 2, 6, main_color);    // terminal nub
+    int fill_w = (18 * percent + 50) / 100;
+    if (fill_w > 0) M5Cardputer.Display.fillRect(212, 10, fill_w, 8, fill_color);
+
+    // percentage right-aligned just left of the icon
+    char pct[8];
+    snprintf(pct, sizeof(pct), "%d%%", percent);
+    display->setTextSize(1);
+    display->setCursor(206 - display->getTextWidth(pct), 11);
+    display->print(pct);
+}
+
+// Case-insensitive substring match of a search filter against a contact/channel name
+static bool nameMatchesFilter(const char* name, const char* filter) {
+    char lower_name[32];
+    char lower_filter[32];
+    int j;
+    for (j = 0; j < 31 && name[j]; j++) lower_name[j] = tolower(name[j]);
+    lower_name[j] = '\0';
+    for (j = 0; j < 31 && filter[j]; j++) lower_filter[j] = tolower(filter[j]);
+    lower_filter[j] = '\0';
+    return strstr(lower_name, lower_filter) != nullptr;
+}
+
 UITask::UITask(mesh::MainBoard* board, BaseSerialInterface* serial_interface)
     : AbstractUITask(board, serial_interface), _display(nullptr),
       _menu_state(MenuScreen::CONTACTS), _next_refresh(0), _auto_off(0),
@@ -55,7 +102,7 @@ UITask::UITask(mesh::MainBoard* board, BaseSerialInterface* serial_interface)
       _chat_history_count(0), _chat_scroll(0), _notification_expiry(0), _has_notification(false),
       _chat_msg_scroll_index(0), _search_filter_length(0), _backspace_hold_start(0), _backspace_was_held(false),
       _last_backspace_delete(0), _delete_processed(false),
-      _settings_selected(false), _settings_category(SettingsCategory::MAIN_MENU), _settings_menu_idx(0), _settings_item_idx(0), _settings_scroll_pos(0), _public_info_scroll_pos(0), _radio_preset_scroll_pos(0), _radio_setup_scroll_pos(0),
+      _settings_selected(false), _settings_category(SettingsCategory::MAIN_MENU), _settings_menu_idx(0), _settings_item_idx(0), _settings_scroll_pos(0), _public_info_scroll_pos(0), _radio_preset_scroll_pos(0), _radio_setup_scroll_pos(0), _device_info_scroll_pos(0),
       _editing_name(false), _show_qr_code(false), _edit_buffer_length(0),
       _editing_frequency(false), _editing_bandwidth(false), _editing_spreading_factor(false), _editing_coding_rate(false), _editing_tx_power(false), _manual_setup_step(-1),
       _show_factory_reset_confirm(false),
@@ -320,20 +367,13 @@ void UITask::renderContactList() {
     _display->setCursor(73, 7);
     _display->print("MeshCore");
     
-    // BLE PIN (right)
-    uint32_t ble_pin = the_mesh.getBLEPin();
-    if (ble_pin != 0 && ble_pin != 123456) {
-        _display->setTextSize(1);
-        char pin[16];
-        sprintf(pin, "%lu", ble_pin);
-        _display->setCursor(189, 11);
-        _display->print(pin);
-    }
+    // Battery (right)
+    drawHeaderBattery(*this, _display, main_color);
     
     int num_contacts = the_mesh.getNumContacts();
     
     // Filter contacts by search term
-    int filtered_indices[64];
+    static int filtered_indices[MAX_CONTACTS];  // static: too large for the loop task stack
     int filtered_count = 0;
     
     if (_search_filter_length > 0) {
@@ -341,17 +381,7 @@ void UITask::renderContactList() {
             ContactInfo contact;
             if (the_mesh.getContactByIdx(i, contact)) {
                 // Case-insensitive search
-                char lower_name[32];
-                char lower_filter[32];
-                for (int j = 0; j < 32 && contact.name[j]; j++) {
-                    lower_name[j] = tolower(contact.name[j]);
-                    lower_name[j+1] = '\0';
-                }
-                for (int j = 0; j < 32 && _search_filter[j]; j++) {
-                    lower_filter[j] = tolower(_search_filter[j]);
-                    lower_filter[j+1] = '\0';
-                }
-                if (strstr(lower_name, lower_filter) != nullptr) {
+                if (nameMatchesFilter(contact.name, _search_filter)) {
                     filtered_indices[filtered_count++] = i;
                 }
             }
@@ -450,15 +480,8 @@ void UITask::renderChannelList() {
     _display->setCursor(73, 7);
     _display->print("MeshCore");
     
-    // BLE PIN (right)
-    uint32_t ble_pin = the_mesh.getBLEPin();
-    if (ble_pin != 0 && ble_pin != 123456) {
-        _display->setTextSize(1);
-        char pin[16];
-        sprintf(pin, "%lu", ble_pin);
-        _display->setCursor(189, 11);
-        _display->print(pin);
-    }
+    // Battery (right)
+    drawHeaderBattery(*this, _display, main_color);
     
     // Count and collect channels
     int num_channels = 0;
@@ -479,17 +502,7 @@ void UITask::renderChannelList() {
     if (_search_filter_length > 0) {
         for (int i = 0; i < num_channels; i++) {
             // Case-insensitive search
-            char lower_name[32];
-            char lower_filter[32];
-            for (int j = 0; j < 32 && channels[i].name[j]; j++) {
-                lower_name[j] = tolower(channels[i].name[j]);
-                lower_name[j+1] = '\0';
-            }
-            for (int j = 0; j < 32 && _search_filter[j]; j++) {
-                lower_filter[j] = tolower(_search_filter[j]);
-                lower_filter[j+1] = '\0';
-            }
-            if (strstr(lower_name, lower_filter) != nullptr) {
+            if (nameMatchesFilter(channels[i].name, _search_filter)) {
                 filtered_indices[filtered_count++] = i;
             }
         }
@@ -1329,106 +1342,77 @@ void UITask::renderSettingsMenu() {
     } else if (_settings_category == SettingsCategory::DEVICE_INFO) {
         _display->setCursor(67, 7);
         _display->print("Device Info");
-        
-        // Show device information
-        _display->setTextSize(1);
-        _display->setColor(DisplayDriver::LIGHT);
-        int y = 30;
-        int line_height = 12;
-        
-        // Device name
+
+        // Build the info lines first, then show a scrollable window of them (size 2 text, ~19 chars per line)
+        const int MAX_LINES = 14;
+        const int LINE_LEN = 20;
+        char lines[MAX_LINES][LINE_LEN];
+        int n = 0;
+
         if (_node_prefs) {
-            _display->setCursor(5, y);
-            _display->print("Name: ");
-            _display->print(_node_prefs->node_name);
-            y += line_height;
+            snprintf(lines[n++], LINE_LEN, "Name: %s", _node_prefs->node_name);
         }
-        
-        // Battery voltage and percentage
+
         uint16_t battery_mv = getBattMilliVolts();
         if (battery_mv > 0) {
-            const int minMilliVolts = 3000;
-            const int maxMilliVolts = 4200;
-            int battery_percent = ((battery_mv - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
-            if (battery_percent < 0) battery_percent = 0;
-            if (battery_percent > 100) battery_percent = 100;
-            
-            _display->setCursor(5, y);
-            _display->print("Battery: ");
-            char battery_str[32];
-            snprintf(battery_str, sizeof(battery_str), "%umV (%d%%)", battery_mv, battery_percent);
-            _display->print(battery_str);
-            y += line_height;
+            snprintf(lines[n++], LINE_LEN, "Batt: %d%% %umV", battPercentFromMv(battery_mv), battery_mv);
         }
-        
-        // GPS Position
+
+        snprintf(lines[n++], LINE_LEN, "Contacts: %d/%d", the_mesh.getNumContacts(), MAX_CONTACTS);
+        uint32_t ble_pin = the_mesh.getBLEPin();
+        if (ble_pin != 0) {
+            snprintf(lines[n++], LINE_LEN, "BT PIN: %06lu", (unsigned long)ble_pin);
+        }
+        snprintf(lines[n++], LINE_LEN, "Free RAM: %uKB", (unsigned)(ESP.getFreeHeap() / 1024));
+
         #ifdef HAS_GPS
         if (_node_prefs && _node_prefs->gps_enabled && _sensors) {
             double lat = _sensors->node_lat;
             double lon = _sensors->node_lon;
-            
             if (lat != 0 || lon != 0) {
-                _display->setCursor(5, y);
-                _display->print("Lat: ");
-                char lat_str[16];
-                snprintf(lat_str, sizeof(lat_str), "%.6f", lat);
-                _display->print(lat_str);
-                y += line_height;
-                
-                _display->setCursor(5, y);
-                _display->print("Lon: ");
-                char lon_str[16];
-                snprintf(lon_str, sizeof(lon_str), "%.6f", lon);
-                _display->print(lon_str);
-                y += line_height;
+                snprintf(lines[n++], LINE_LEN, "Lat: %.6f", lat);
+                snprintf(lines[n++], LINE_LEN, "Lon: %.6f", lon);
             } else {
-                _display->setCursor(5, y);
-                _display->print("GPS: No fix");
-                y += line_height;
+                snprintf(lines[n++], LINE_LEN, "GPS: No fix");
             }
         } else {
-            _display->setCursor(5, y);
-            _display->print("GPS: Disabled");
-            y += line_height;
+            snprintf(lines[n++], LINE_LEN, "GPS: Disabled");
         }
         #endif
-        
-        // Radio settings
+
         if (_node_prefs) {
-            _display->setCursor(5, y);
-            _display->print("Freq: ");
-            char freq_str[16];
-            snprintf(freq_str, sizeof(freq_str), "%.3f", _node_prefs->freq);
-            _display->print(freq_str);
-            _display->print(" MHz");
-            y += line_height;
-            
-            _display->setCursor(5, y);
-            _display->print("SF: ");
-            char radio_str[32];
-            snprintf(radio_str, sizeof(radio_str), "%u  BW: %.1f kHz", _node_prefs->sf, _node_prefs->bw);
-            _display->print(radio_str);
-            y += line_height;
-            
-            _display->setCursor(5, y);
-            _display->print("TX Power: ");
-            char power_str[16];
-            snprintf(power_str, sizeof(power_str), "%u dBm", _node_prefs->tx_power_dbm);
-            _display->print(power_str);
-            y += line_height;
+            snprintf(lines[n++], LINE_LEN, "Freq: %.3fMHz", _node_prefs->freq);
+            snprintf(lines[n++], LINE_LEN, "SF: %u BW: %.1f", _node_prefs->sf, _node_prefs->bw);
+            snprintf(lines[n++], LINE_LEN, "TX Power: %udBm", _node_prefs->tx_power_dbm);
         }
-        
-        // Uptime
-        _display->setCursor(5, y);
-        _display->print("Uptime: ");
+
         unsigned long uptime_sec = millis() / 1000;
-        unsigned long hours = uptime_sec / 3600;
-        unsigned long minutes = (uptime_sec % 3600) / 60;
-        unsigned long seconds = uptime_sec % 60;
-        char uptime_str[20];
-        snprintf(uptime_str, sizeof(uptime_str), "%luh %lum %lus", hours, minutes, seconds);
-        _display->print(uptime_str);
-        
+        snprintf(lines[n++], LINE_LEN, "Uptime: %luh%02lum%02lus",
+                 uptime_sec / 3600, (uptime_sec % 3600) / 60, uptime_sec % 60);
+
+        // Scroll window: 6 lines of 18px from y=28
+        const int VISIBLE = 6;
+        const int LINE_H = 18;
+        const int TOP = 28;
+        int max_scroll = n > VISIBLE ? n - VISIBLE : 0;
+        if (_device_info_scroll_pos > max_scroll) _device_info_scroll_pos = max_scroll;
+        if (_device_info_scroll_pos < 0) _device_info_scroll_pos = 0;
+
+        _display->setTextSize(2);
+        _display->setColor(DisplayDriver::LIGHT);
+        for (int i = 0; i < VISIBLE && _device_info_scroll_pos + i < n; i++) {
+            _display->setCursor(4, TOP + i * LINE_H + 1);
+            _display->print(lines[_device_info_scroll_pos + i]);
+        }
+
+        // Scrollbar on the right edge when there's more than fits
+        if (max_scroll > 0) {
+            int track_h = VISIBLE * LINE_H;
+            int thumb_h = track_h * VISIBLE / n;
+            int thumb_y = TOP + (track_h - thumb_h) * _device_info_scroll_pos / max_scroll;
+            _display->fillRect(237, thumb_y, 3, thumb_h);
+        }
+
     } else {
         // Other categories (empty for now)
         const char* title = "";
@@ -2665,6 +2649,30 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
     
     // In CONTACTS or CHANNELS menu - check for navigation first, then filter
     if (_menu_state == MenuScreen::CONTACTS || _menu_state == MenuScreen::CHANNELS) {
+        // FN+` (escape): clear an active search, otherwise jump straight to settings
+        if (status.fn) {
+            bool has_escape = false;
+            for (auto key : status.word) {
+                if (key == '`') has_escape = true;
+            }
+            if (has_escape) {
+                if (_search_filter_length > 0) {
+                    _search_filter_length = 0;
+                    _search_filter[0] = '\0';
+                    _scroll_pos = 0;
+                    _selected_idx = 0;
+                } else {
+                    _menu_state = MenuScreen::SETTINGS;
+                    _settings_category = SettingsCategory::MAIN_MENU;
+                    _settings_menu_idx = 0;
+                    _settings_item_idx = 0;
+                    _settings_scroll_pos = 0;
+                    _settings_selected = false;
+                }
+                return;
+            }
+        }
+
         // Check for FN+DEL combination first (delete contact/channel)
         // FN modifier is in status.fn, DEL key (BACKSPACE) is in status.del
         if (status.fn && status.del) {
@@ -2679,22 +2687,12 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
                 
                 // Build filtered list if search is active
                 if (_search_filter_length > 0) {
-                    int filtered_indices[64];
+                    static int filtered_indices[MAX_CONTACTS];  // static: too large for the loop task stack
                     int filtered_count = 0;
                     for (int i = 0; i < num_contacts; i++) {
                         ContactInfo contact;
                         if (the_mesh.getContactByIdx(i, contact)) {
-                            char lower_name[32];
-                            char lower_filter[32];
-                            for (int j = 0; j < 32 && contact.name[j]; j++) {
-                                lower_name[j] = tolower(contact.name[j]);
-                                lower_name[j+1] = '\0';
-                            }
-                            for (int j = 0; j < 32 && _search_filter[j]; j++) {
-                                lower_filter[j] = tolower(_search_filter[j]);
-                                lower_filter[j+1] = '\0';
-                            }
-                            if (strstr(lower_name, lower_filter) != nullptr) {
+                            if (nameMatchesFilter(contact.name, _search_filter)) {
                                 filtered_indices[filtered_count++] = i;
                             }
                         }
@@ -2755,17 +2753,7 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
                         int filtered_indices[MAX_GROUP_CHANNELS];
                         int filtered_count = 0;
                         for (int i = 0; i < num_channels; i++) {
-                            char lower_name[32];
-                            char lower_filter[32];
-                            for (int j = 0; j < 32 && channels[i].name[j]; j++) {
-                                lower_name[j] = tolower(channels[i].name[j]);
-                                lower_name[j+1] = '\0';
-                            }
-                            for (int j = 0; j < 32 && _search_filter[j]; j++) {
-                                lower_filter[j] = tolower(_search_filter[j]);
-                                lower_filter[j+1] = '\0';
-                            }
-                            if (strstr(lower_name, lower_filter) != nullptr) {
+                            if (nameMatchesFilter(channels[i].name, _search_filter)) {
                                 filtered_indices[filtered_count++] = i;
                             }
                         }
@@ -2899,24 +2887,14 @@ void UITask::handleNavigation(Keyboard_Class::KeysState& status) {
             int num_contacts = the_mesh.getNumContacts();
             
             // Build filtered list for navigation
-            int filtered_indices[64];
+            static int filtered_indices[MAX_CONTACTS];  // static: too large for the loop task stack
             int filtered_count = 0;
             
             if (_search_filter_length > 0) {
                 for (int i = 0; i < num_contacts; i++) {
                     ContactInfo contact;
                     if (the_mesh.getContactByIdx(i, contact)) {
-                        char lower_name[32];
-                        char lower_filter[32];
-                        for (int j = 0; j < 32 && contact.name[j]; j++) {
-                            lower_name[j] = tolower(contact.name[j]);
-                            lower_name[j+1] = '\0';
-                        }
-                        for (int j = 0; j < 32 && _search_filter[j]; j++) {
-                            lower_filter[j] = tolower(_search_filter[j]);
-                            lower_filter[j+1] = '\0';
-                        }
-                        if (strstr(lower_name, lower_filter) != nullptr) {
+                        if (nameMatchesFilter(contact.name, _search_filter)) {
                             filtered_indices[filtered_count++] = i;
                         }
                     }
@@ -3037,17 +3015,7 @@ void UITask::handleNavigation(Keyboard_Class::KeysState& status) {
             
             if (_search_filter_length > 0) {
                 for (int i = 0; i < num_channels; i++) {
-                    char lower_name[32];
-                    char lower_filter[32];
-                    for (int j = 0; j < 32 && channels[i].name[j]; j++) {
-                        lower_name[j] = tolower(channels[i].name[j]);
-                        lower_name[j+1] = '\0';
-                    }
-                    for (int j = 0; j < 32 && _search_filter[j]; j++) {
-                        lower_filter[j] = tolower(_search_filter[j]);
-                        lower_filter[j+1] = '\0';
-                    }
-                    if (strstr(lower_name, lower_filter) != nullptr) {
+                    if (nameMatchesFilter(channels[i].name, _search_filter)) {
                         filtered_indices[filtered_count++] = i;
                     }
                 }
@@ -3193,7 +3161,7 @@ void UITask::handleNavigation(Keyboard_Class::KeysState& status) {
                             case 1: _settings_category = SettingsCategory::RADIO_SETUP; break;
                             case 2: _settings_category = SettingsCategory::THEME; break;
                             case 3: _settings_category = SettingsCategory::OTHER; break;
-                            case 4: _settings_category = SettingsCategory::DEVICE_INFO; break;
+                            case 4: _settings_category = SettingsCategory::DEVICE_INFO; _device_info_scroll_pos = 0; break;
                         }
                         _settings_item_idx = 0;
                         _settings_menu_idx = 0;
@@ -3592,9 +3560,12 @@ void UITask::handleNavigation(Keyboard_Class::KeysState& status) {
                 }
                 
             } else if (_settings_category == SettingsCategory::DEVICE_INFO) {
-                // Device Info - read-only, any key press returns to menu
-                if (up || down || left || right || select) {
-                    // Any key - back to main menu
+                // Device Info - read-only: up/down scroll (clamped when rendered), any other key returns to menu
+                if (up) {
+                    if (_device_info_scroll_pos > 0) _device_info_scroll_pos--;
+                } else if (down) {
+                    _device_info_scroll_pos++;
+                } else if (left || right || select) {
                     _settings_category = SettingsCategory::MAIN_MENU;
                     _settings_item_idx = 0;
                     _settings_menu_idx = 0;
