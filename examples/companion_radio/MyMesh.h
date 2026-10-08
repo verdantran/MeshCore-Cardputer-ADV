@@ -63,6 +63,17 @@
 #define OFFLINE_QUEUE_SIZE 16
 #endif
 
+// OFFLINE_QUEUE_FLASH: keep the offline queue in the filesystem (append-only segment files),
+// with the RAM queue only used as a fallback if a flash write fails
+#ifdef OFFLINE_QUEUE_FLASH
+  #ifndef OFFLINE_FLASH_SEG_SIZE
+  #define OFFLINE_FLASH_SEG_SIZE 8       // messages per segment file
+  #endif
+  #ifndef OFFLINE_FLASH_MAX_MSGS
+  #define OFFLINE_FLASH_MAX_MSGS 1024    // oldest segment is dropped beyond this
+  #endif
+#endif
+
 #ifndef BLE_NAME_PREFIX
 #define BLE_NAME_PREFIX "MeshCore-"
 #endif
@@ -169,6 +180,13 @@ private:
   void updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, const uint8_t *frame, int len);
   void addToOfflineQueue(const uint8_t frame[], int len);
   int getFromOfflineQueue(uint8_t frame[]);
+  int getOfflineQueueCount() const;
+#ifdef OFFLINE_QUEUE_FLASH
+  void initFlashQueue();
+  bool addToFlashQueue(const uint8_t frame[], int len);
+  int getFromFlashQueue(uint8_t frame[]);
+  int countFlashSegment(uint32_t seq, uint32_t from_pos);
+#endif
   int getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]) override { 
     return _store->getBlobByKey(key, key_len, dest_buf);
   }
@@ -214,6 +232,13 @@ private:
   };
   int offline_queue_len;
   Frame offline_queue[OFFLINE_QUEUE_SIZE];
+#ifdef OFFLINE_QUEUE_FLASH
+  bool oq_flash_ok;
+  uint32_t oq_head_seq, oq_tail_seq;   // segment files [head..tail] may exist
+  uint32_t oq_head_pos;                // read offset within the head segment
+  int oq_tail_count;                   // messages already in the tail segment
+  int oq_flash_count;                  // unread messages across all segments
+#endif
 
   struct AckTableEntry {
     unsigned long msg_sent;

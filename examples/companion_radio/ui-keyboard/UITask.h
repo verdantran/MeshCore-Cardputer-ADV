@@ -148,6 +148,7 @@ private:
     int _public_info_scroll_pos; // Scroll position for Public Info options
     int _radio_preset_scroll_pos; // Scroll position for Radio Preset list
     int _radio_setup_scroll_pos; // Scroll position for Radio Setup list
+    int _device_info_scroll_pos; // Scroll position for Device Info lines
     
     // Public Info editing state
     bool _editing_name;
@@ -185,6 +186,14 @@ private:
     int _chat_history_count;
     int _chat_scroll;
     int _chat_msg_scroll_index; // Index of first message to display (0 = newest)
+    int _chat_name_scroll_px;          // Header name marquee offset (pixels)
+    uint32_t _chat_name_next_step;     // millis() of next marquee step
+    bool _chat_name_overflows;         // Header name is wider than its slot, so it scrolls
+    void drawChatHeaderName();
+    bool _favourites_only;             // Contacts screen shows only favourites (Tab toggles, persisted)
+    int buildContactList();            // Fills the visible contact list (search + favourites filters), returns count
+    int currentHomeTab() const;        // 0 = Contacts, 1 = Favourites, 2 = Channels
+    void switchHomeTab(int tab);
     
     // Unread channels tracking
     bool _channel_has_unread[MAX_GROUP_CHANNELS];

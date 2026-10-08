@@ -107,6 +107,19 @@ void BaseChatMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, 
     is_new = true;
     if (num_contacts < MAX_CONTACTS) {
       from = &contacts[num_contacts++];
+    } else {
+      // table is full: recycle the least recently heard contact that isn't a favourite
+      for (int i = 0; i < num_contacts; i++) {
+        if ((contacts[i].flags & 1) == 0 && (from == NULL || contacts[i].lastmod < from->lastmod)) {
+          from = &contacts[i];
+        }
+      }
+      if (from) {
+        MESH_DEBUG_PRINTLN("onAdvertRecv: contacts table full, replacing: %s", from->name);
+        memset(from, 0, sizeof(*from));
+      }
+    }
+    if (from) {
       from->id = id;
       from->out_path_len = -1;  // initially out_path is unknown
       from->gps_lat = 0;   // initially unknown GPS loc
