@@ -1,4 +1,44 @@
-This is a personal fork of the repo created by Stachugit. See the [original here](https://github.com/Stachugit/MeshCore-Cardputer-ADV). The original README follows as so:
+This is a personal fork of the repo created by Stachugit. See the [original here](https://github.com/Stachugit/MeshCore-Cardputer-ADV).
+
+## Changes in this fork
+
+### Fixes
+- **Crash loop with more than 64 contacts** - the contact list used a 64-slot array, so once more contacts were heard the device crashed on the contacts screen and kept crashing on every reboot
+- **Backspace and FN+ESC not working when built from source** - the M5Cardputer library is now pinned to 1.1.1 (1.2.0 changed how these keys are reported). RadioLib, M5Unified and M5GFX are pinned too, so rebuilds stay reproducible
+- **Contact/channel search** reading uninitialised memory for empty names and overflowing on 32-character names
+- **GPS on/off from the app** used a hand-copied settings layout that only worked by chance; it now uses the real one
+
+### Contacts and messages
+- **Up to 500 contacts** (was 200). When the list is full, the least recently heard contact that isn't a favourite is replaced, instead of new contacts being silently ignored
+- **Offline message queue stored in flash** - messages waiting for the phone app are kept in internal flash (up to 1024) instead of RAM, and now survive reboots and power loss
+- **Favourites** - star contacts on the device; favourites are never auto-replaced and sync with the phone app's favourite flag on its next contact refresh
+
+### Interface
+- **Tab bar with icons** - Contacts, Favourites and Channels, in the theme colours
+- **Battery icon and percentage** in the top-right of the home screen, using a LiPo discharge curve for a more realistic reading
+- **Favourite star button** in the chat header
+- **Long chat names scroll** across the header instead of being cut off
+- **Device Info** is larger and scrollable, and adds the Bluetooth PIN, contact usage (e.g. 186/500) and free RAM
+
+### Keyboard controls (new or changed)
+- **Tab** - Cycle tabs: Contacts → Favourites → Channels
+- **🟠 ←** / **🟠 →** - Move between the three tabs
+- **🟠 FN+F** - Favourite / unfavourite the selected contact, or the contact you're chatting with
+- **🟠 FN+ESC** on the home screen - Clear the search, or open Settings if not searching
+- **🟠 ↑** / **🟠 ↓** in Device Info - Scroll
+
+### Notes
+- **The Bluetooth pairing PIN** is now under **Settings → Device Info** (the top-right corner shows the battery). The original setup steps below still refer to the top-right corner
+- **The web flasher, M5Burner and release binaries below install the original firmware, not this fork.** To use this fork, build and flash it from source:
+  ```bash
+  pio run -e M5stack_cardputer_cap_lora1262_companion -t upload
+  ```
+  A normal upload keeps your settings, contacts and channels. Don't use `-t erase` or `-t uploadfs`, which wipe them
+- Verbose logging is off by default; uncomment `MESH_DEBUG=1` in `variants/m5stack_cardputer/platformio.ini` to turn it back on
+
+---
+
+The original README follows as so:
 
 # 🔥 MeshCore-Cardputer-ADV 🔥
 
