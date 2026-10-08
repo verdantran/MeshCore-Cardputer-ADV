@@ -110,20 +110,10 @@ static bool nameMatchesFilter(const char* name, const char* filter) {
 #define CHAT_NAME_STEP_MS 60
 #define CHAT_NAME_STEP_PX 2
 
-// Map a position in the (optionally search-filtered) contact list to the real contact index, or -1
-static int contactIdxForListPos(const char* filter, int filter_len, int list_pos) {
-    if (list_pos < 0) return -1;
-    int num_contacts = the_mesh.getNumContacts();
-    if (filter_len == 0) return list_pos < num_contacts ? list_pos : -1;
-    int matches = 0;
-    for (int i = 0; i < num_contacts; i++) {
-        ContactInfo contact;
-        if (the_mesh.getContactByIdx(i, contact) && nameMatchesFilter(contact.name, filter)) {
-            if (matches++ == list_pos) return i;
-        }
-    }
-    return -1;
-}
+// The contacts currently visible on the Contacts screen, as real contact indexes in display order.
+// Filled by UITask::buildContactList(); drawing, navigation, delete and favourite all use it so they
+// always agree on which contact is at each list position.
+static int s_contact_list[MAX_CONTACTS];  // static: too large for the loop task stack
 
 // Small 5-point star centred on (cx, cy), filled or as an outline
 static void drawStar(int cx, int cy, int r, uint16_t color, bool filled = true) {
@@ -155,6 +145,65 @@ static int toggleContactFavourite(const uint8_t* pub_key) {
     return c->flags;
 }
 
+int UITask::buildContactList() {
+    int num_contacts = the_mesh.getNumContacts();
+    int count = 0;
+    for (int i = 0; i < num_contacts; i++) {
+        if (_search_filter_length == 0 && !_favourites_only) {
+            s_contact_list[count++] = i;   // no filters: skip the per-contact copy
+            continue;
+        }
+        ContactInfo contact;
+        if (!the_mesh.getContactByIdx(i, contact)) continue;
+        if (_favourites_only && (contact.flags & 1) == 0) continue;
+        if (_search_filter_length > 0 && !nameMatchesFilter(contact.name, _search_filter)) continue;
+        s_contact_list[count++] = i;
+    }
+    return count;
+}
+
+// Home screen tabs, in bottom bar order
+#define HOME_TAB_CONTACTS   0
+#define HOME_TAB_FAVOURITES 1
+#define HOME_TAB_CHANNELS   2
+#define NUM_HOME_TABS       3
+
+int UITask::currentHomeTab() const {
+    if (_menu_state == MenuScreen::CHANNELS) return HOME_TAB_CHANNELS;
+    return _favourites_only ? HOME_TAB_FAVOURITES : HOME_TAB_CONTACTS;
+}
+
+void UITask::switchHomeTab(int tab) {
+    tab = ((tab % NUM_HOME_TABS) + NUM_HOME_TABS) % NUM_HOME_TABS;
+    _menu_state = (tab == HOME_TAB_CHANNELS) ? MenuScreen::CHANNELS : MenuScreen::CONTACTS;
+    if (tab != HOME_TAB_CHANNELS) {
+        bool fav = (tab == HOME_TAB_FAVOURITES);
+        if (fav != _favourites_only) {
+            _favourites_only = fav;
+            saveSettings();   // remember Contacts vs Favourites across reboots
+        }
+    }
+    _scroll_pos = 0;
+    _selected_idx = 0;
+    _settings_selected = false;
+    _search_filter_length = 0;
+    _search_filter[0] = '\0';
+}
+
+// Bottom bar tab icons, drawn centred on (cx, cy)
+static void drawContactsIcon(int cx, int cy, uint16_t color) {
+    M5Cardputer.Display.fillCircle(cx, cy - 5, 4, color);              // head
+    M5Cardputer.Display.fillRoundRect(cx - 7, cy + 1, 14, 8, 4, color); // shoulders
+}
+
+static void drawChannelsIcon(int cx, int cy, uint16_t color) {
+    // '#'
+    M5Cardputer.Display.fillRect(cx - 4, cy - 7, 2, 15, color);
+    M5Cardputer.Display.fillRect(cx + 2, cy - 7, 2, 15, color);
+    M5Cardputer.Display.fillRect(cx - 7, cy - 3, 15, 2, color);
+    M5Cardputer.Display.fillRect(cx - 7, cy + 2, 15, 2, color);
+}
+
 UITask::UITask(mesh::MainBoard* board, BaseSerialInterface* serial_interface)
     : AbstractUITask(board, serial_interface), _display(nullptr),
       _menu_state(MenuScreen::CONTACTS), _next_refresh(0), _auto_off(0),
@@ -164,7 +213,7 @@ UITask::UITask(mesh::MainBoard* board, BaseSerialInterface* serial_interface)
       _chat_history_count(0), _chat_scroll(0), _notification_expiry(0), _has_notification(false),
       _chat_msg_scroll_index(0), _search_filter_length(0), _backspace_hold_start(0), _backspace_was_held(false),
       _last_backspace_delete(0), _delete_processed(false),
-      _settings_selected(false), _settings_category(SettingsCategory::MAIN_MENU), _settings_menu_idx(0), _settings_item_idx(0), _settings_scroll_pos(0), _public_info_scroll_pos(0), _radio_preset_scroll_pos(0), _radio_setup_scroll_pos(0), _device_info_scroll_pos(0), _chat_name_scroll_px(0), _chat_name_next_step(0), _chat_name_overflows(false),
+      _settings_selected(false), _settings_category(SettingsCategory::MAIN_MENU), _settings_menu_idx(0), _settings_item_idx(0), _settings_scroll_pos(0), _public_info_scroll_pos(0), _radio_preset_scroll_pos(0), _radio_setup_scroll_pos(0), _device_info_scroll_pos(0), _chat_name_scroll_px(0), _chat_name_next_step(0), _chat_name_overflows(false), _favourites_only(false),
       _editing_name(false), _show_qr_code(false), _edit_buffer_length(0),
       _editing_frequency(false), _editing_bandwidth(false), _editing_spreading_factor(false), _editing_coding_rate(false), _editing_tx_power(false), _manual_setup_step(-1),
       _show_factory_reset_confirm(false),
@@ -434,45 +483,37 @@ void UITask::renderContactList() {
     
     // MeshCore title (center)
     _display->setTextSize(2);
-    _display->setCursor(73, 7);
-    _display->print("MeshCore");
+    if (_favourites_only) {
+        // Favourites view: star + "Faves", centred as a group
+        drawStar(88, 14, 7, main_color);
+        _display->setCursor(100, 7);
+        _display->print("Faves");
+    } else {
+        _display->setCursor(73, 7);
+        _display->print("MeshCore");
+    }
     
     // Battery (right)
     drawHeaderBattery(*this, _display, main_color);
     
-    int num_contacts = the_mesh.getNumContacts();
-    
-    // Filter contacts by search term
-    static int filtered_indices[MAX_CONTACTS];  // static: too large for the loop task stack
-    int filtered_count = 0;
-    
-    if (_search_filter_length > 0) {
-        for (int i = 0; i < num_contacts; i++) {
-            ContactInfo contact;
-            if (the_mesh.getContactByIdx(i, contact)) {
-                // Case-insensitive search
-                if (nameMatchesFilter(contact.name, _search_filter)) {
-                    filtered_indices[filtered_count++] = i;
-                }
-            }
-        }
-        num_contacts = filtered_count;
-    } else {
-        // No filter - show all
-        for (int i = 0; i < num_contacts; i++) {
-            filtered_indices[i] = i;
-        }
-        filtered_count = num_contacts;
-    }
+    // Visible contacts after search and favourites filters
+    int num_contacts = buildContactList();
+    int* filtered_indices = s_contact_list;
     
     if (num_contacts == 0) {
         _display->setTextSize(2);
         _display->setColor(DisplayDriver::LIGHT);
-        const char* msg = "No contacts";
+        const char* msg = (_favourites_only && _search_filter_length == 0) ? "No favourites" : "No contacts";
         int msg_width = _display->getTextWidth(msg);
         int msg_x = (240 - msg_width) / 2;
         _display->setCursor(msg_x, 60);
         _display->print(msg);
+        if (_favourites_only && _search_filter_length == 0) {
+            _display->setTextSize(1);
+            const char* hint = "Press Fn+F on a contact to add it here";
+            _display->setCursor((240 - _display->getTextWidth(hint)) / 2, 82);
+            _display->print(hint);
+        }
     } else {
         // Render 3 contact items (y: 27, 54, 81)
         int y_positions[3] = {27, 54, 81};
@@ -518,7 +559,7 @@ void UITask::renderContactList() {
 
                 if (is_favourite) {
                     bool selected = (contact_idx == _selected_idx && _selected_idx != -1);
-                    drawStar(226, y + 13, 7, selected ? TFT_BLACK : COLORS[_main_color_idx].rgb565);
+                    drawStar(226, y + 13, 7, selected ? COLORS[_secondary_color_idx].rgb565 : COLORS[_main_color_idx].rgb565);
                 }
             }
         }
@@ -1042,40 +1083,34 @@ void UITask::renderBottomBar() {
         return;
     }
     
-    // Draw tab bar border (0, 108, 240, 27)
+    // Tab bar (0, 108, 240, 27): Contacts | Favourites | Channels, as icons. Tab / , / cycle through them
     _display->setColor(DisplayDriver::LIGHT);
     _display->drawRect(0, bar_y, 240, 27);
-    
-    _display->setTextSize(2);
-    
-    // Contacts tab (left half: 0-120)
-    if (_menu_state == MenuScreen::CONTACTS) {
-        // Active - white fill, black text
-        _display->setColor(DisplayDriver::LIGHT);
-        _display->fillRect(0, bar_y, 120, 27);
-        _display->setColor(DisplayDriver::DARK);
-        _display->setCursor(13, bar_y + 7);
-        _display->print("Contacts");
-    } else {
-        // Inactive - white text only
-        _display->setColor(DisplayDriver::LIGHT);
-        _display->setCursor(13, bar_y + 7);
-        _display->print("Contacts");
-    }
-    
-    // Channels tab (right half: 120-240)
-    if (_menu_state == MenuScreen::CHANNELS) {
-        // Active - white fill, black text
-        _display->setColor(DisplayDriver::LIGHT);
-        _display->fillRect(120, bar_y, 120, 27);
-        _display->setColor(DisplayDriver::DARK);
-        _display->setCursor(133, bar_y + 7);
-        _display->print("Channels");
-    } else {
-        // Inactive - white text only
-        _display->setColor(DisplayDriver::LIGHT);
-        _display->setCursor(133, bar_y + 7);
-        _display->print("Channels");
+
+    uint16_t main_color = COLORS[_main_color_idx].rgb565;
+    uint16_t secondary_color = COLORS[_secondary_color_idx].rgb565;
+    const int tab_w = 240 / NUM_HOME_TABS;
+    int active = currentHomeTab();
+
+    for (int t = 0; t < NUM_HOME_TABS; t++) {
+        int x = t * tab_w;
+        int cx = x + tab_w / 2;
+        int cy = bar_y + 13;
+        uint16_t icon_color = main_color;
+        if (t == active) {
+            // Active: filled with the main colour, icon in the secondary colour
+            _display->setColor(DisplayDriver::LIGHT);
+            _display->fillRect(x, bar_y, tab_w, 27);
+            icon_color = secondary_color;
+        } else if (t > 0) {
+            _display->setColor(DisplayDriver::LIGHT);
+            _display->drawRect(x, bar_y, 1, 27);   // divider
+        }
+        switch (t) {
+            case HOME_TAB_CONTACTS:   drawContactsIcon(cx, cy, icon_color); break;
+            case HOME_TAB_FAVOURITES: drawStar(cx, cy, 8, icon_color); break;
+            case HOME_TAB_CHANNELS:   drawChannelsIcon(cx, cy, icon_color); break;
+        }
     }
 }
 
@@ -2771,6 +2806,12 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
     
     // In CONTACTS or CHANNELS menu - check for navigation first, then filter
     if (_menu_state == MenuScreen::CONTACTS || _menu_state == MenuScreen::CHANNELS) {
+        // Tab: cycle the bottom bar tabs (Contacts -> Favourites -> Channels)
+        if (status.tab) {
+            switchHomeTab(currentHomeTab() + 1);
+            return;
+        }
+
         // FN+` (escape): clear an active search, otherwise jump straight to settings
         if (status.fn) {
             bool has_escape = false;
@@ -2782,10 +2823,15 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
             // FN+F: toggle favourite on the selected contact (favourites are never auto-replaced when the list is full)
             if (has_fav) {
                 if (_menu_state == MenuScreen::CONTACTS && !_settings_selected) {
-                    int idx = contactIdxForListPos(_search_filter, _search_filter_length, _selected_idx);
+                    int count = buildContactList();
                     ContactInfo contact;
-                    if (idx >= 0 && the_mesh.getContactByIdx(idx, contact)) {
+                    if (_selected_idx >= 0 && _selected_idx < count
+                            && the_mesh.getContactByIdx(s_contact_list[_selected_idx], contact)) {
                         toggleContactFavourite(contact.id.pub_key);
+                        // in favourites view an unstarred contact drops out of the list
+                        count = buildContactList();
+                        if (_selected_idx >= count) _selected_idx = count > 0 ? count - 1 : 0;
+                        if (_selected_idx < _scroll_pos) _scroll_pos = _selected_idx;
                     }
                 }
                 return;
@@ -2816,30 +2862,11 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
                 _delete_processed = true;
                 
                 if (_menu_state == MenuScreen::CONTACTS) {
-                // Get current selected contact (account for filtering)
-                int num_contacts = the_mesh.getNumContacts();
+                // Get current selected contact from the visible (filtered) list
+                int num_contacts = buildContactList();
                 int contact_to_delete_idx = -1;
-                
-                // Build filtered list if search is active
-                if (_search_filter_length > 0) {
-                    static int filtered_indices[MAX_CONTACTS];  // static: too large for the loop task stack
-                    int filtered_count = 0;
-                    for (int i = 0; i < num_contacts; i++) {
-                        ContactInfo contact;
-                        if (the_mesh.getContactByIdx(i, contact)) {
-                            if (nameMatchesFilter(contact.name, _search_filter)) {
-                                filtered_indices[filtered_count++] = i;
-                            }
-                        }
-                    }
-                    if (filtered_count > 0 && _selected_idx < filtered_count) {
-                        contact_to_delete_idx = filtered_indices[_selected_idx];
-                    }
-                } else {
-                    // No filter - use direct index
-                    if (num_contacts > 0 && _selected_idx < num_contacts) {
-                        contact_to_delete_idx = _selected_idx;
-                    }
+                if (!_settings_selected && _selected_idx >= 0 && _selected_idx < num_contacts) {
+                    contact_to_delete_idx = s_contact_list[_selected_idx];
                 }
                 
                 // Delete contact immediately
@@ -2857,8 +2884,8 @@ void UITask::handleKeyPress(Keyboard_Class::KeysState& status) {
                         _notification_expiry = millis() + 1500;
                         _has_notification = true;
                         
-                        // Adjust selection
-                        num_contacts = the_mesh.getNumContacts();
+                        // Adjust selection to the new visible list
+                        num_contacts = buildContactList();
                         if (_selected_idx >= num_contacts && num_contacts > 0) {
                             _selected_idx = num_contacts - 1;
                         }
@@ -3019,37 +3046,13 @@ void UITask::handleNavigation(Keyboard_Class::KeysState& status) {
     
     switch (_menu_state) {
         case MenuScreen::CONTACTS: {
-            int num_contacts = the_mesh.getNumContacts();
-            
-            // Build filtered list for navigation
-            static int filtered_indices[MAX_CONTACTS];  // static: too large for the loop task stack
-            int filtered_count = 0;
-            
-            if (_search_filter_length > 0) {
-                for (int i = 0; i < num_contacts; i++) {
-                    ContactInfo contact;
-                    if (the_mesh.getContactByIdx(i, contact)) {
-                        if (nameMatchesFilter(contact.name, _search_filter)) {
-                            filtered_indices[filtered_count++] = i;
-                        }
-                    }
-                }
-                num_contacts = filtered_count;
-            } else {
-                for (int i = 0; i < num_contacts; i++) {
-                    filtered_indices[i] = i;
-                }
-                filtered_count = num_contacts;
-            }
+            // Visible contacts after search and favourites filters
+            int num_contacts = buildContactList();
+            int* filtered_indices = s_contact_list;
             
             if (left || right) {
-                // Switch to channels, deselect settings icon
-                _menu_state = MenuScreen::CHANNELS;
-                _scroll_pos = 0;
-                _selected_idx = 0;
-                _settings_selected = false;
-                _search_filter_length = 0;
-                _search_filter[0] = '\0';
+                // Move to the neighbouring bottom bar tab
+                switchHomeTab(currentHomeTab() + (right ? 1 : -1));
             } else if (up) {
                 if (_settings_selected) {
                     // Already on settings icon, wrap to last contact
@@ -3165,13 +3168,8 @@ void UITask::handleNavigation(Keyboard_Class::KeysState& status) {
             }
             
             if (left || right) {
-                // Switch to contacts, deselect settings icon
-                _menu_state = MenuScreen::CONTACTS;
-                _scroll_pos = 0;
-                _selected_idx = 0;
-                _settings_selected = false;
-                _search_filter_length = 0;
-                _search_filter[0] = '\0';
+                // Move to the neighbouring bottom bar tab
+                switchHomeTab(currentHomeTab() + (right ? 1 : -1));
             } else if (up) {
                 if (_settings_selected) {
                     // Already on settings icon, wrap to last channel

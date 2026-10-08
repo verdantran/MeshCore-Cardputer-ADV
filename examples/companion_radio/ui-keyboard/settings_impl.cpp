@@ -24,6 +24,7 @@ void UITask::loadSettings() {
     _brightness = prefs.getUChar("brightness", 128);
     _main_color_idx = prefs.getUChar("main_color", 0);
     _secondary_color_idx = prefs.getUChar("sec_color", 1);
+    _favourites_only = prefs.getUChar("fav_only", 0) != 0;
     
     prefs.end();
     
@@ -52,6 +53,7 @@ void UITask::saveSettings() {
     prefs.putUChar("brightness", _brightness);
     prefs.putUChar("main_color", _main_color_idx);
     prefs.putUChar("sec_color", _secondary_color_idx);
+    prefs.putUChar("fav_only", _favourites_only ? 1 : 0);
     
     prefs.end();
     

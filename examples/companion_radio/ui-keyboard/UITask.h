@@ -190,6 +190,10 @@ private:
     uint32_t _chat_name_next_step;     // millis() of next marquee step
     bool _chat_name_overflows;         // Header name is wider than its slot, so it scrolls
     void drawChatHeaderName();
+    bool _favourites_only;             // Contacts screen shows only favourites (Tab toggles, persisted)
+    int buildContactList();            // Fills the visible contact list (search + favourites filters), returns count
+    int currentHomeTab() const;        // 0 = Contacts, 1 = Favourites, 2 = Channels
+    void switchHomeTab(int tab);
     
     // Unread channels tracking
     bool _channel_has_unread[MAX_GROUP_CHANNELS];
