@@ -186,6 +186,10 @@ private:
     int _chat_history_count;
     int _chat_scroll;
     int _chat_msg_scroll_index; // Index of first message to display (0 = newest)
+    int _chat_name_scroll_px;          // Header name marquee offset (pixels)
+    uint32_t _chat_name_next_step;     // millis() of next marquee step
+    bool _chat_name_overflows;         // Header name is wider than its slot, so it scrolls
+    void drawChatHeaderName();
     
     // Unread channels tracking
     bool _channel_has_unread[MAX_GROUP_CHANNELS];
